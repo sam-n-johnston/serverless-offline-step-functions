@@ -1,30 +1,28 @@
 import { promises as fs, constants as FsConstants } from 'fs';
 import path from 'path';
 
-import type { StateTypeExecutor } from '../StateTypeExecutor';
+import { StateTypeExecutor } from '../StateTypeExecutor';
 import type { StateExecutorOutput } from '../../types/StateExecutorOutput';
 import type { TaskStateDefinition } from '../../types/State';
 
 import { StateInfoHandler } from '../../StateInfoHandler';
 import { StateProcessor } from '../../StateProcessor';
+import { Context } from '../../Context/Context';
 
-export class TaskExecutor implements StateTypeExecutor {
+export class TaskExecutor extends StateTypeExecutor {
   public async execute(
-    stateMachineName: string,
-    stateName: string,
+    context: Context,
     stateDefinition: TaskStateDefinition,
     inputJson: string | undefined,
   ): Promise<StateExecutorOutput> {
     const statesInfoHandler = StateInfoHandler.getInstance();
-    const stateInfo = statesInfoHandler.getStateInfo(stateMachineName, stateName);
+    const stateInfo = statesInfoHandler.getStateInfo(context.StateMachine.Name, context.State.Name);
 
     if (!stateInfo) {
       throw new Error('Handler does not exists');
     }
 
-    // TODO: Handle Lambda Context and Callback
-    const input = this.processInput(inputJson, stateDefinition);
-    const context = {};
+    const input = this.processInput(inputJson, stateDefinition, context);
     const lambdaPath = await this.getWebpackOrCommonFuction(stateInfo.handlerPath);
     const functionLambda = await import(`${lambdaPath}`);
 
@@ -32,7 +30,7 @@ export class TaskExecutor implements StateTypeExecutor {
     const output = await functionLambda[stateInfo.handlerName](input, context);
     this.removeEnvVarsLambdaSpecific(stateInfo.environment);
 
-    const outputJson = this.processOutput(output, stateDefinition);
+    const outputJson = this.processOutput(input, output, stateDefinition);
 
     return {
       Next: stateDefinition.Next,
@@ -41,26 +39,36 @@ export class TaskExecutor implements StateTypeExecutor {
     };
   }
 
-  private processInput(json: string | undefined, stateDefinition: TaskStateDefinition): any {
+  public isWaitForTaskToken(resource?: string): boolean {
+    if (resource && resource.endsWith('.waitForTaskToken')) {
+      return true;
+    }
+    return false;
+  }
+
+  private processInput(json: string | undefined, stateDefinition: TaskStateDefinition, context: Context): any {
     const proccessedInputJson = StateProcessor.processInputPath(json, stateDefinition.InputPath);
 
     let output = proccessedInputJson;
 
     if (stateDefinition.Parameters && stateDefinition.Resource.endsWith('.waitForTaskToken')) {
-      output = StateProcessor.processWaitForTokenParameters(proccessedInputJson, stateDefinition.Parameters);
+      output = StateProcessor.processWaitForTokenParameters(proccessedInputJson, stateDefinition.Parameters, context);
     } else {
-      // TODO: Process non WaitForToken Parameters
-      // output = StateProcessor.processParameters(proccessedInputJson, stateDefinition.Parameters);
+      output = StateProcessor.processParameters(proccessedInputJson, stateDefinition.Parameters);
     }
 
     return JSON.parse(output);
   }
 
-  private processOutput(output: any, stateDefinition: TaskStateDefinition): string {
+  private processOutput(
+    input: Record<string, unknown>,
+    output: Record<string, unknown>,
+    stateDefinition: TaskStateDefinition,
+  ): string {
     let outputJson = output ? JSON.stringify(output) : '{}';
 
     // TODO: Do Result Selector
-    outputJson = StateProcessor.processResultPath(outputJson, stateDefinition.ResultPath);
+    outputJson = StateProcessor.processResultPath(input, output, stateDefinition.ResultPath);
     outputJson = StateProcessor.processOutputPath(outputJson, stateDefinition.OutputPath);
 
     return outputJson;

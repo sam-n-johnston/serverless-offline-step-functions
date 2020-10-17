@@ -1,5 +1,8 @@
 import { JSONPath } from 'jsonpath-plus';
-import { PayloadTemplate } from '../src/types/State';
+import { PayloadTemplateType } from '../src/types/State';
+import { Context } from './Context/Context';
+import { LambdaWaitFotTokenPayloadTemplate } from './PayloadTemplates/LambdaWaitFotTokenPayloadTemplate';
+import { ParameterPayloadTemplate } from './PayloadTemplates/ParameterPayloadTemplate';
 
 export class StateProcessor {
   public static processInputPath(dataJson: string | undefined | null, inputPath: string | null | undefined): string {
@@ -21,83 +24,63 @@ export class StateProcessor {
     return JSON.stringify(result[0]);
   }
 
-  private static validateWaitForTokenParameters(parameters: PayloadTemplate) {
-    const acceptableParameterProperties = ['FunctionName', 'Payload'];
-
-    if (!parameters.FunctionName) {
-      throw new Error(`The field 'FunctionName' is required but was missing`);
-    }
-
-    Object.keys(parameters).forEach((key) => {
-      if (!acceptableParameterProperties.includes(key)) {
-        throw new Error(`The field "${key}" is not supported by Step Functions`);
-      }
-    });
-  }
-
-  private static isContextObjectPath(path: string) {
-    return path.startsWith('$$.');
-  }
-
-  private static isPathKey(path: string) {
-    return path.endsWith('.$');
-  }
-
   public static processWaitForTokenParameters(
     dataJson: string | undefined | null,
-    parameters: PayloadTemplate,
+    parameters: PayloadTemplateType,
+    context: Context,
   ): string {
     const inputJson = dataJson || '{}';
 
-    this.validateWaitForTokenParameters(parameters);
+    /**
+     * Get correct PayloadTemplate based on the type of the resource (lambda/sqs/sns/etc.)
+     * For now, only lambdas are implemented
+     */
+    const payloadTemplate = LambdaWaitFotTokenPayloadTemplate.create(parameters, context);
 
-    if (typeof parameters.Payload !== 'object') {
-      return '{}';
-    }
-
-    const output = {};
-
-    // TODO: To extract to a recursive function so that every method can use it
-    Object.entries(parameters.Payload).forEach(([key, value]: [string, unknown]) => {
-      if (this.isPathKey(key)) {
-        if (typeof value !== 'string') {
-          throw new Error(
-            `The value for the field '${key}' must be a STRING that contains a JSONPath but was an ${typeof value}`,
-          );
-        }
-
-        const newKey = key.substring(0, key.length - 2);
-
-        if (this.isContextObjectPath(value)) {
-          output[newKey] = value.substring(3);
-        } else {
-          const result = JSONPath({
-            path: value === undefined ? '$' : value,
-            json: JSON.parse(inputJson),
-          });
-
-          output[newKey] = result[0];
-        }
-      } else {
-        // TODO: Traverse object deeply
-        output[key] = value;
-      }
-    });
-
-    return JSON.stringify(output);
+    return JSON.stringify(payloadTemplate.process(inputJson));
   }
 
-  public static processResultPath(json: string, resultPath?: string): string {
-    const result = JSONPath({
-      path: resultPath || '$',
-      json: JSON.parse(json),
-    });
-
-    if (!result || result.length === 0) {
-      throw new Error('');
+  public static processParameters(
+    dataJson: string | undefined | null,
+    payloadTemplateInput?: PayloadTemplateType,
+  ): string {
+    if (!payloadTemplateInput) {
+      return dataJson || '{}';
     }
 
-    return JSON.stringify(result[0]);
+    const inputJson = dataJson || '{}';
+
+    const payloadTemplate = ParameterPayloadTemplate.create(payloadTemplateInput);
+
+    return JSON.stringify(payloadTemplate.process(inputJson));
+  }
+
+  public static processResultPath(
+    input: Record<string, unknown>,
+    result: Record<string, unknown>,
+    resultPath?: string,
+  ): string {
+    if (!resultPath || resultPath === '$') {
+      return JSON.stringify(result);
+    }
+
+    const resultPathArray = (JSONPath as any).toPathArray(resultPath);
+
+    let temp: any = input;
+    for (let i = 1; i < resultPathArray.length; i++) {
+      const key = resultPathArray[i];
+      if (i === resultPathArray.length - 1) {
+        temp[key] = result;
+      } else {
+        if (!temp[key]) {
+          temp[key] = {};
+        }
+
+        temp = temp[key];
+      }
+    }
+
+    return JSON.stringify(input);
   }
 
   public static processOutputPath(json: string, outputPath?: string): string {
